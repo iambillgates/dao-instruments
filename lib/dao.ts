@@ -1,0 +1,1311 @@
+// @ts-nocheck
+/* DAO Instruments — client logic, ported verbatim from the original
+   single-file page (dao-instruments.html export of the Space).
+   Runs once after mount via initDao(); manipulates the DOM directly,
+   exactly as the static page did. THREE comes from the CDN script
+   loaded in the root layout (window.THREE). */
+declare const THREE: any;
+
+export function initDao() {
+  /* ===== AUDIO + NAVIGASI (hub) ===== */
+    /* ============================================================
+       AUDIO ENGINE — satu AudioContext untuk semua instrumen.
+       Dibuat/dilanjutkan hanya setelah interaksi pengguna.
+       ============================================================ */
+    let AC = null, MASTER = null;
+    function ac(){
+      if(!AC){
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        AC = new Ctx();
+        MASTER = AC.createGain();
+        MASTER.gain.value = 0.85;
+        const comp = AC.createDynamicsCompressor();
+        comp.threshold.value = -18; comp.ratio.value = 6;
+        MASTER.connect(comp); comp.connect(AC.destination);
+      }
+      if(AC.state === "suspended") AC.resume();
+      return AC;
+    }
+    function noiseBuffer(){
+      const len = AC.sampleRate * 1;
+      const buf = AC.createBuffer(1, len, AC.sampleRate);
+      const d = buf.getChannelData(0);
+      for(let i=0;i<len;i++) d[i] = Math.random()*2-1;
+      return buf;
+    }
+    let NOISE = null;
+    function getNoise(){ if(!NOISE) NOISE = noiseBuffer(); return NOISE; }
+
+    function env(g, t, peak, a, d, sustain){
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(Math.max(peak,0.0002), t + a);
+      g.gain.exponentialRampToValueAtTime(Math.max(sustain||0.0001,0.0002), t + a + d);
+    }
+    function playKick(t, vol){
+      const o = AC.createOscillator(), g = AC.createGain();
+      o.type = "sine";
+      o.frequency.setValueAtTime(150, t);
+      o.frequency.exponentialRampToValueAtTime(42, t + 0.11);
+      env(g, t, vol||0.9, 0.002, 0.24);
+      o.connect(g); g.connect(MASTER);
+      o.start(t); o.stop(t + 0.3);
+    }
+    function playHat(t, vol, open){
+      const src = AC.createBufferSource(); src.buffer = getNoise();
+      const f = AC.createBiquadFilter(); f.type = "highpass"; f.frequency.value = 7500;
+      const g = AC.createGain();
+      env(g, t, vol||0.28, 0.001, open ? 0.3 : 0.05);
+      src.connect(f); f.connect(g); g.connect(MASTER);
+      src.start(t); src.stop(t + (open ? 0.4 : 0.09));
+    }
+    function playSnare(t, vol){
+      const src = AC.createBufferSource(); src.buffer = getNoise();
+      const f = AC.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 1900; f.Q.value = 0.8;
+      const g = AC.createGain(); env(g, t, vol||0.5, 0.001, 0.13);
+      src.connect(f); f.connect(g); g.connect(MASTER);
+      src.start(t); src.stop(t + 0.18);
+      const o = AC.createOscillator(), g2 = AC.createGain();
+      o.type = "triangle"; o.frequency.value = 185;
+      env(g2, t, 0.25, 0.001, 0.08);
+      o.connect(g2); g2.connect(MASTER); o.start(t); o.stop(t + 0.1);
+    }
+    function playBass(freq, t, vol, dur){
+      const o = AC.createOscillator(), o2 = AC.createOscillator();
+      const f = AC.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 6;
+      f.frequency.setValueAtTime(900, t);
+      f.frequency.exponentialRampToValueAtTime(160, t + (dur||0.22));
+      const g = AC.createGain(); env(g, t, vol||0.5, 0.004, dur||0.22);
+      o.type = "sawtooth"; o.frequency.value = freq;
+      o2.type = "square"; o2.frequency.value = freq/2;
+      const g2 = AC.createGain(); g2.gain.value = 0.5;
+      o.connect(f); o2.connect(g2); g2.connect(f); f.connect(g); g.connect(MASTER);
+      o.start(t); o2.start(t); o.stop(t + (dur||0.22) + 0.05); o2.stop(t + (dur||0.22) + 0.05);
+    }
+    function playPluck(freq, t, opt){
+      opt = opt || {};
+      const o = AC.createOscillator();
+      o.type = opt.wave || "triangle";
+      o.frequency.value = freq * (opt.detune || 1);
+      const f = AC.createBiquadFilter(); f.type = "lowpass";
+      f.frequency.value = opt.cutoff || 2600; f.Q.value = opt.q || 1;
+      const g = AC.createGain();
+      const dur = opt.dur || 0.5;
+      env(g, t, opt.vol || 0.3, opt.attack || 0.005, dur);
+      o.connect(f); f.connect(g); g.connect(MASTER);
+      o.start(t); o.stop(t + dur + 0.1);
+      return { osc:o, filter:f, gain:g };
+    }
+    function playPad(freqs, t, vol, dur){
+      freqs.forEach(function(fr){
+        const o = AC.createOscillator(); o.type = "sine"; o.frequency.value = fr;
+        const o2 = AC.createOscillator(); o2.type = "triangle"; o2.frequency.value = fr; o2.detune.value = 7;
+        const g = AC.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime((vol||0.1), t + 0.4);
+        g.gain.setValueAtTime(vol||0.1, t + (dur||1.6) - 0.4);
+        g.gain.linearRampToValueAtTime(0.0001, t + (dur||1.6));
+        o.connect(g); o2.connect(g); g.connect(MASTER);
+        o.start(t); o2.start(t); o.stop(t + (dur||1.6) + 0.05); o2.stop(t + (dur||1.6) + 0.05);
+      });
+    }
+    const NOTE = { C:0,"C#":1,D:2,"D#":3,E:4,F:5,"F#":6,G:7,"G#":8,A:9,"A#":10,B:11 };
+    function freqOf(name, oct){ return 440 * Math.pow(2, (NOTE[name] + (oct-4)*12 - 9)/12); }
+    const PENTA = [0,2,4,7,9]; // major pentatonic semitones
+    function pentaFreq(root, idx){
+      const oct = Math.floor(idx/5), st = PENTA[((idx%5)+5)%5];
+      return root * Math.pow(2, (st + oct*12)/12);
+    }
+
+    /* toast */
+    let toastTimer = null;
+    function toast(msg){
+      const el = document.getElementById("toast");
+      el.textContent = msg; el.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(function(){ el.classList.remove("show"); }, 2600);
+    }
+
+    /* ============================================================
+       NAVIGASI — hub <-> instrumen, dengan start/stop lifecycle.
+       ============================================================ */
+    const Instruments = {}; // name -> {init, start, stop}
+    let currentView = null;
+    function showHub(){
+      if(currentView && Instruments[currentView] && Instruments[currentView].stop) Instruments[currentView].stop();
+      currentView = null;
+      document.querySelectorAll(".view").forEach(function(v){ v.classList.remove("active"); });
+      document.getElementById("hub").style.display = "";
+      window.scrollTo(0,0);
+    }
+    function openInstrument(name){
+      ac(); // interaksi pengguna -> audio boleh mulai
+      if(currentView && Instruments[currentView] && Instruments[currentView].stop) Instruments[currentView].stop();
+      document.getElementById("hub").style.display = "none";
+      document.querySelectorAll(".view").forEach(function(v){ v.classList.remove("active"); });
+      document.getElementById("view-" + name).classList.add("active");
+      currentView = name;
+      window.scrollTo(0,0);
+      const inst = Instruments[name];
+      if(inst){
+        if(!inst._inited){ inst.init(); inst._inited = true; }
+        if(inst.start) inst.start();
+      }
+    }
+    document.querySelectorAll("[data-open]").forEach(function(b){
+      b.addEventListener("click", function(){ openInstrument(b.getAttribute("data-open")); });
+    });
+    document.querySelectorAll("[data-back]").forEach(function(b){
+      b.addEventListener("click", showHub);
+    });
+    function hasThree(){ return typeof THREE !== "undefined"; }
+    function threeFail(el){
+      el.innerHTML = '<p style="padding:28px;color:#a39d88;font-family:Georgia,serif;font-style:italic;">Three.js gagal dimuat dari CDN — periksa koneksi internet lalu buka lagi instrumen ini.</p>';
+    }
+
+  /* ===== 1. PANDORA ===== */
+    /* ============================================================
+       1. PANDORA 樸 — kubus Rubik 3x3 + step sequencer 16 langkah.
+       Tiap sisi kubus = satu track. Putar layer = putar urutan langkah.
+       ============================================================ */
+    Instruments.pandora = (function(){
+      const TRACKS = [
+        { id:"kick",  name:"Kick",  face:"Atas",     color:0xe8e2d0 },
+        { id:"snare", name:"Snare", face:"Depan",    color:0xd95d39 },
+        { id:"hat",   name:"Hat",   face:"Kanan",    color:0xd9a441 },
+        { id:"bass",  name:"Bass",  face:"Bawah",    color:0x3f3a30 },
+        { id:"pad",   name:"Pad",   face:"Belakang", color:0x5fae9e },
+        { id:"arp",   name:"Arp",   face:"Kiri",     color:0x84b06c }
+      ];
+      const DEFAULTS = {
+        kick:  [1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,1,0],
+        snare: [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,1],
+        hat:   [0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,1],
+        bass:  [1,0,0,1, 0,0,1,0, 1,0,0,1, 0,1,0,0],
+        pad:   [1,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0],
+        arp:   [0,1,0,1, 0,1,0,1, 1,0,1,0, 1,0,1,0]
+      };
+      let pattern = {}, playing = false, step = 0, timer = null, bpm = 112;
+      let renderer, scene, camera, cubeGroup, cubies = [], raf = null;
+      let rotX = -0.5, rotY = 0.7, tRotX = -0.5, tRotY = 0.7;
+      let spinAnim = null; // {axis, from, to, start}
+      const ARP_NOTES = [0,3,2,1, 0,3,2,1, 4,3,2,1, 0,2,3,5];
+
+      function resetPattern(){
+        pattern = {};
+        TRACKS.forEach(function(t){ pattern[t.id] = DEFAULTS[t.id].slice(); });
+      }
+      function buildGrid(){
+        const grid = document.getElementById("pand-grid");
+        grid.innerHTML = "";
+        TRACKS.forEach(function(tr){
+          const row = document.createElement("div"); row.className = "seq-row";
+          const nm = document.createElement("span"); nm.className = "rname"; nm.textContent = tr.name;
+          row.appendChild(nm);
+          for(let s=0;s<16;s++){
+            const c = document.createElement("button");
+            c.className = "cell" + (s%4===0 ? " grp" : "");
+            c.setAttribute("aria-label", tr.name + " langkah " + (s+1));
+            c.dataset.track = tr.id; c.dataset.step = s;
+            c.addEventListener("click", function(){
+              ac();
+              pattern[tr.id][s] = pattern[tr.id][s] ? 0 : 1;
+              paintGrid();
+              if(pattern[tr.id][s]) triggerTrack(tr.id, AC.currentTime, s);
+            });
+            row.appendChild(c);
+          }
+          grid.appendChild(row);
+        });
+        paintGrid();
+      }
+      function paintGrid(){
+        document.querySelectorAll("#pand-grid .cell").forEach(function(c){
+          const on = pattern[c.dataset.track][+c.dataset.step];
+          c.classList.toggle("hit", !!on);
+          c.classList.toggle("now", playing && +c.dataset.step === step);
+        });
+      }
+      function triggerTrack(id, t, s){
+        if(id === "kick") playKick(t, 0.95);
+        else if(id === "snare") playSnare(t, 0.55);
+        else if(id === "hat") playHat(t, 0.3, s % 8 === 6);
+        else if(id === "bass") playBass(freqOf("C",2) * (s % 8 < 4 ? 1 : 0.89), t, 0.5, 0.24);
+        else if(id === "pad") playPad([freqOf("C",3), freqOf("E",3), freqOf("G",3), freqOf("B",3)], t, 0.07, 1.9);
+        else if(id === "arp") playPluck(pentaFreq(freqOf("C",4), ARP_NOTES[s % 16]), t, { wave:"triangle", vol:0.26, dur:0.3, cutoff:3200 });
+      }
+      function tick(){
+        const t = AC.currentTime + 0.03;
+        TRACKS.forEach(function(tr){
+          if(pattern[tr.id][step]) triggerTrack(tr.id, t, step);
+        });
+        paintGrid();
+        flashFace(step);
+        step = (step + 1) % 16;
+      }
+      function flashFace(s){
+        // kedipkan cubie tengah sisi sesuai track yang berbunyi di langkah ini
+        cubies.forEach(function(cu){
+          if(cu.userData.flashUntil && performance.now() > cu.userData.flashUntil){
+            cu.material.forEach(function(m){ if(m.emissive) m.emissive.setHex(0x000000); });
+            cu.userData.flashUntil = 0;
+          }
+        });
+        TRACKS.forEach(function(tr, ti){
+          if(!pattern[tr.id][s]) return;
+          const target = cubies.filter(function(cu){ return cu.userData.faceIdx === ti; });
+          target.forEach(function(cu){
+            cu.material.forEach(function(m){ if(m.emissive) m.emissive.setHex(0x332211); });
+            cu.userData.flashUntil = performance.now() + 140;
+          });
+        });
+      }
+      function setPlaying(on){
+        playing = on;
+        document.getElementById("pand-play").textContent = on ? "⏸ Hentikan" : "▶ Mainkan loop";
+        if(on){
+          ac(); step = 0;
+          tick();
+          timer = setInterval(tick, (60/bpm)/4 * 1000);
+        } else {
+          clearInterval(timer); timer = null; paintGrid();
+        }
+      }
+      function layerRotate(layer){
+        // Layer 0=atas (kick+pad), 1=tengah (snare+bass), 2=bawah (hat+arp):
+        // putaran 90° = geser 4 langkah pada kedua track layer itu.
+        const pairs = [[0,4],[1,3],[2,5]];
+        pairs[layer].forEach(function(ti){
+          const id = TRACKS[ti].id, arr = pattern[id];
+          pattern[id] = arr.slice(4).concat(arr.slice(0,4));
+        });
+        paintGrid();
+        // animasikan kubus berputar 90°
+        const axis = layer === 1 ? "x" : "y";
+        const now = performance.now();
+        spinAnim = { axis:axis, from: axis === "y" ? tRotY : tRotX, delta: Math.PI/2, start: now, dur: 380 };
+        if(axis === "y") tRotY += Math.PI/2; else tRotX += Math.PI/2;
+      }
+      function initThree(){
+        const stage = document.getElementById("pandora-stage");
+        if(!hasThree()){ threeFail(stage); return; }
+        renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        stage.appendChild(renderer.domElement);
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+        camera.position.set(0, 0, 9.2);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+        const key = new THREE.DirectionalLight(0xfff2d8, 1.1); key.position.set(4,6,6); scene.add(key);
+        const rim = new THREE.DirectionalLight(0x5fae9e, 0.5); rim.position.set(-6,-3,-4); scene.add(rim);
+        cubeGroup = new THREE.Group(); scene.add(cubeGroup);
+        const faceOf = function(x,y,z){
+          // indeks track berdasarkan sisi luar cubie
+          if(y === 1) return 0; if(y === -1) return 3;
+          if(z === 1) return 1; if(z === -1) return 4;
+          if(x === 1) return 2; if(x === -1) return 5;
+          return -1;
+        };
+        const inner = new THREE.MeshBasicMaterial({ color:0x17170f });
+        for(let x=-1;x<=1;x++) for(let y=-1;y<=1;y++) for(let z=-1;z<=1;z++){
+          if(x===0 && y===0 && z===0) continue;
+          const mats = [];
+          const dirs = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+          dirs.forEach(function(d){
+            const onFace = (d[0]!==0 && d[0]===x) || (d[1]!==0 && d[1]===y) || (d[2]!==0 && d[2]===z);
+            if(onFace){
+              mats.push(new THREE.MeshStandardMaterial({ color:0xffffff, roughness:0.55, metalness:0.05 }));
+            } else mats.push(inner);
+          });
+          // warnai tiap material sisi dengan warna track-nya
+          const faceIdxMap = { "1,0,0":2, "-1,0,0":5, "0,1,0":0, "0,-1,0":3, "0,0,1":1, "0,0,-1":4 };
+          dirs.forEach(function(d, di){
+            const onFace = (d[0]!==0 && d[0]===x) || (d[1]!==0 && d[1]===y) || (d[2]!==0 && d[2]===z);
+            if(onFace) mats[di].color.setHex(TRACKS[faceIdxMap[d.join(",")]].color);
+          });
+          const geo = new THREE.BoxGeometry(0.94, 0.94, 0.94);
+          const mesh = new THREE.Mesh(geo, mats);
+          mesh.position.set(x*1.0, y*1.0, z*1.0);
+          // faceIdx dominan untuk flash & klik: sisi dengan |komponen| terbesar yang menghadap luar
+          let fi = -1;
+          if(y===1) fi = 0; else if(y===-1) fi = 3;
+          else if(z===1) fi = 1; else if(z===-1) fi = 4;
+          else if(x===1) fi = 2; else if(x===-1) fi = 5;
+          mesh.userData.faceIdx = fi;
+          cubeGroup.add(mesh); cubies.push(mesh);
+        }
+        // interaksi: seret = putar, klik = bunyikan sisi
+        const el = renderer.domElement;
+        let dragging = false, moved = 0, lx = 0, ly = 0;
+        el.style.touchAction = "none";
+        el.addEventListener("pointerdown", function(e){
+          dragging = true; moved = 0; lx = e.clientX; ly = e.clientY;
+          el.setPointerCapture(e.pointerId);
+        });
+        el.addEventListener("pointermove", function(e){
+          if(!dragging) return;
+          const dx = e.clientX - lx, dy = e.clientY - ly;
+          moved += Math.abs(dx) + Math.abs(dy);
+          tRotY += dx * 0.008; tRotX += dy * 0.008;
+          tRotX = Math.max(-1.4, Math.min(1.4, tRotX));
+          lx = e.clientX; ly = e.clientY;
+        });
+        el.addEventListener("pointerup", function(e){
+          dragging = false;
+          if(moved > 6) return;
+          ac();
+          // raycast ke cubie
+          const rect = el.getBoundingClientRect();
+          const nd = new THREE.Vector2(((e.clientX-rect.left)/rect.width)*2-1, -((e.clientY-rect.top)/rect.height)*2+1);
+          const rc = new THREE.Raycaster(); rc.setFromCamera(nd, camera);
+          const hits = rc.intersectObjects(cubies);
+          if(hits.length){
+            const hit = hits[0];
+            const n = hit.face.normal.clone();
+            const map = { "1,0,0":2, "-1,0,0":5, "0,1,0":0, "0,-1,0":3, "0,0,1":1, "0,0,-1":4 };
+            const key2 = [Math.round(n.x), Math.round(n.y), Math.round(n.z)].join(",");
+            const ti = map[key2];
+            if(ti !== undefined){
+              triggerTrack(TRACKS[ti].id, AC.currentTime, 0);
+              toast("Sisi " + TRACKS[ti].face + " → " + TRACKS[ti].name);
+            }
+          }
+        });
+        resize();
+        window.addEventListener("resize", resize);
+      }
+      function resize(){
+        if(!renderer) return;
+        const stage = document.getElementById("pandora-stage");
+        const w = stage.clientWidth, h = stage.clientHeight;
+        renderer.setSize(w, h);
+        camera.aspect = w/h; camera.updateProjectionMatrix();
+      }
+      function loop(){
+        raf = requestAnimationFrame(loop);
+        if(spinAnim){
+          const p = Math.min(1, (performance.now() - spinAnim.start)/spinAnim.dur);
+          const e = 1 - Math.pow(1-p, 3);
+          if(spinAnim.axis === "y") rotY = spinAnim.from + spinAnim.delta * e;
+          else rotX = spinAnim.from + spinAnim.delta * e;
+          if(p >= 1) spinAnim = null;
+        } else {
+          rotX += (tRotX - rotX) * 0.12;
+          rotY += (tRotY - rotY) * 0.12;
+        }
+        if(!spinAnim) tRotY += 0.0016; // drift pelan
+        cubeGroup.rotation.set(rotX, rotY, 0);
+        renderer.render(scene, camera);
+      }
+      return {
+        init: function(){
+          resetPattern(); buildGrid();
+          initThree();
+          document.getElementById("pand-play").addEventListener("click", function(){ setPlaying(!playing); });
+          document.getElementById("pand-layer-u").addEventListener("click", function(){ ac(); layerRotate(0); });
+          document.getElementById("pand-layer-m").addEventListener("click", function(){ ac(); layerRotate(1); });
+          document.getElementById("pand-layer-d").addEventListener("click", function(){ ac(); layerRotate(2); });
+          document.getElementById("pand-shuffle").addEventListener("click", function(){
+            ac();
+            TRACKS.forEach(function(tr){
+              if(Math.random() < 0.75){
+                const shift = 1 + Math.floor(Math.random()*15);
+                const arr = pattern[tr.id];
+                pattern[tr.id] = arr.slice(shift).concat(arr.slice(0,shift));
+              }
+              if(tr.id === "arp" || tr.id === "hat"){
+                for(let i=0;i<3;i++){ const s = Math.floor(Math.random()*16); pattern[tr.id][s] = pattern[tr.id][s] ? 0 : 1; }
+              }
+            });
+            paintGrid();
+            tRotY += Math.PI * 2;
+            toast("Kubus diacak — dengarkan susunan barunya.");
+          });
+          document.getElementById("pand-reset").addEventListener("click", function(){ resetPattern(); paintGrid(); });
+          const bpmEl = document.getElementById("pand-bpm");
+          bpmEl.addEventListener("input", function(){
+            bpm = +bpmEl.value;
+            document.getElementById("pand-bpm-o").textContent = bpm + " BPM";
+            if(playing){ clearInterval(timer); timer = setInterval(tick, (60/bpm)/4 * 1000); }
+          });
+        },
+        start: function(){ resize(); if(!raf && renderer) loop(); },
+        stop: function(){
+          if(raf) cancelAnimationFrame(raf); raf = null;
+          if(playing) setPlaying(false);
+        }
+      };
+    })();
+
+  /* ===== 2. WAKE ===== */
+    /* ============================================================
+       2. WAKE 森 — hutan 3D. Sentuhan terekam ke loop 16 langkah.
+       ============================================================ */
+    Instruments.wake = (function(){
+      const WORLD_R = 19;
+      let renderer, scene, camera, raf = null;
+      let avatar, avatarLight, lightOrb, beam;
+      let trees = [], rocks = [];
+      const lightPos = { x:9, z:-9 }; // objek polos: jangan sentuh THREE sebelum init
+      const player = { x:-10, z:10, tx:-10, tz:10, speed:6 };
+      const keysDown = {};
+      let loopSteps = new Array(16).fill(null); // {freq, kind}
+      let playing = false, step = 0, timer = null, bpm = 96;
+      let lastTouchAt = {};
+      const SCALE_ROOT = 196; // G3-ish base
+
+      function buildDots(){
+        const wrap = document.getElementById("wake-dots");
+        wrap.innerHTML = "";
+        for(let i=0;i<16;i++){
+          const d = document.createElement("div");
+          d.className = "sdot"; d.id = "wake-dot-" + i;
+          wrap.appendChild(d);
+        }
+        paintDots();
+      }
+      function paintDots(){
+        for(let i=0;i<16;i++){
+          const d = document.getElementById("wake-dot-" + i);
+          if(!d) continue;
+          d.classList.toggle("has", !!loopSteps[i]);
+          d.classList.toggle("now", playing && i === step);
+        }
+      }
+      function status(msg){ document.getElementById("wake-status").textContent = msg; }
+      function distToLight(x, z){ return Math.hypot(x - lightPos.x, z - lightPos.z); }
+      function touchSound(kind, x, z){
+        ac();
+        const t = AC.currentTime;
+        const d = distToLight(x, z);
+        // makin dekat cahaya -> makin rendah: geser oktaf dari +1 ke -1
+        const closeness = 1 - Math.min(1, d / (WORLD_R * 1.6));
+        const drop = Math.round(closeness * 7); // hingga 7 langkah pentatonik lebih rendah
+        if(kind === "beam"){
+          playKick(t, 0.9);
+          loopSteps[step] = { kind:"kick", freq:0 };
+          status("Beam tersentuh — kick terekam di langkah " + (step+1) + ".");
+        } else if(kind === "ground"){
+          const f = pentaFreq(SCALE_ROOT/2, Math.max(0, 6 - drop));
+          playBass(f, t, 0.55, 0.4);
+          loopSteps[step] = { kind:"bass", freq:f };
+          status("Tanah bergetar — bass rendah terekam di langkah " + (step+1) + ".");
+        } else {
+          const base = kind === "rock" ? 2 : 5;
+          const idx = Math.max(0, base + 4 - drop);
+          const f = pentaFreq(SCALE_ROOT, idx);
+          playPluck(f, t, { wave:"sine", vol:0.4, dur:0.9, cutoff:2400 });
+          playPluck(f * 2, t + 0.02, { wave:"triangle", vol:0.12, dur:0.6 });
+          loopSteps[step] = { kind:"note", freq:f };
+          status((kind === "rock" ? "Batu" : "Pohon") + " berbunyi — not terekam di langkah " + (step+1) + " (jarak ke cahaya " + d.toFixed(1) + ").");
+        }
+        paintDots();
+      }
+      function tick(){
+        const t = AC.currentTime + 0.03;
+        const s = loopSteps[step];
+        if(s){
+          if(s.kind === "kick") playKick(t, 0.8);
+          else if(s.kind === "bass") playBass(s.freq, t, 0.5, 0.38);
+          else playPluck(s.freq, t, { wave:"sine", vol:0.34, dur:0.8, cutoff:2200 });
+        }
+        // beam memberi kick bila pemain dekat cahaya
+        if(step % 4 === 0 && distToLight(player.x, player.z) < 4.5) playKick(t, 0.5);
+        paintDots();
+        step = (step + 1) % 16;
+      }
+      function setPlaying(on){
+        playing = on;
+        document.getElementById("wake-play").textContent = on ? "⏸ Hentikan loop" : "▶ Jalankan loop";
+        if(on){ ac(); step = 0; tick(); timer = setInterval(tick, (60/bpm)/2 * 1000); }
+        else { clearInterval(timer); timer = null; paintDots(); }
+      }
+      function makeTree(x, z, s){
+        const g = new THREE.Group();
+        const trunk = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.16*s, 0.24*s, 1.6*s, 6),
+          new THREE.MeshStandardMaterial({ color:0x2e2419, roughness:1 })
+        );
+        trunk.position.y = 0.8*s;
+        g.add(trunk);
+        const leafMat = new THREE.MeshStandardMaterial({ color:0x1d3320, roughness:1, emissive:0x000000 });
+        const c1 = new THREE.Mesh(new THREE.ConeGeometry(1.1*s, 2.6*s, 7), leafMat);
+        c1.position.y = 2.6*s;
+        const c2 = new THREE.Mesh(new THREE.ConeGeometry(0.8*s, 2.0*s, 7), leafMat);
+        c2.position.y = 3.9*s;
+        g.add(c1); g.add(c2);
+        g.position.set(x, 0, z);
+        g.userData = { kind:"tree", mats:[leafMat], glowUntil:0, x:x, z:z };
+        scene.add(g); trees.push(g);
+      }
+      function initThree(){
+        const stage = document.getElementById("wake-stage");
+        if(!hasThree()){ threeFail(stage); return; }
+        renderer = new THREE.WebGLRenderer({ antialias:true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        stage.appendChild(renderer.domElement);
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x07090a);
+        scene.fog = new THREE.Fog(0x07090a, 8, 34);
+        camera = new THREE.PerspectiveCamera(55, 1, 0.1, 100);
+        scene.add(new THREE.AmbientLight(0x33402e, 0.7));
+        // tanah
+        const ground = new THREE.Mesh(
+          new THREE.CircleGeometry(WORLD_R + 4, 48),
+          new THREE.MeshStandardMaterial({ color:0x11150d, roughness:1 })
+        );
+        ground.rotation.x = -Math.PI/2; ground.name = "ground";
+        scene.add(ground);
+        // titik-titik bintang debu (point cloud suasana)
+        const pn = 900, pos = new Float32Array(pn*3);
+        for(let i=0;i<pn;i++){
+          const a = Math.random()*Math.PI*2, r = Math.sqrt(Math.random())*WORLD_R;
+          pos[i*3] = Math.cos(a)*r; pos[i*3+1] = 0.15 + Math.random()*3.2; pos[i*3+2] = Math.sin(a)*r;
+        }
+        const pg = new THREE.BufferGeometry();
+        pg.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+        const pts = new THREE.Points(pg, new THREE.PointsMaterial({ color:0x9db98a, size:0.07, transparent:true, opacity:0.55 }));
+        scene.add(pts);
+        // pohon & batu acak
+        for(let i=0;i<64;i++){
+          const a = Math.random()*Math.PI*2, r = 3 + Math.sqrt(Math.random())*(WORLD_R-3);
+          const x = Math.cos(a)*r, z = Math.sin(a)*r;
+          if(Math.hypot(x-lightPos.x, z-lightPos.z) < 3.4) continue;
+          if(Math.hypot(x-player.x, z-player.z) < 2.5) continue;
+          makeTree(x, z, 0.75 + Math.random()*0.8);
+        }
+        for(let i=0;i<16;i++){
+          const a = Math.random()*Math.PI*2, r = 2.5 + Math.sqrt(Math.random())*(WORLD_R-3);
+          const x = Math.cos(a)*r, z = Math.sin(a)*r;
+          const mat = new THREE.MeshStandardMaterial({ color:0x3a3d38, roughness:0.9, emissive:0x000000 });
+          const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.45 + Math.random()*0.5), mat);
+          rock.position.set(x, 0.3, z);
+          rock.rotation.set(Math.random()*3, Math.random()*3, Math.random()*3);
+          rock.userData = { kind:"rock", mats:[mat], glowUntil:0, x:x, z:z };
+          scene.add(rock); rocks.push(rock);
+        }
+        // cahaya: orb + beam + spotlight
+        lightOrb = new THREE.Mesh(
+          new THREE.SphereGeometry(0.55, 20, 20),
+          new THREE.MeshBasicMaterial({ color:0xfff3c4 })
+        );
+        lightOrb.position.set(lightPos.x, 3.4, lightPos.z);
+        scene.add(lightOrb);
+        const beamMat = new THREE.MeshBasicMaterial({ color:0xffe9a8, transparent:true, opacity:0.13, side:THREE.DoubleSide, depthWrite:false });
+        beam = new THREE.Mesh(new THREE.ConeGeometry(2.6, 7.5, 24, 1, true), beamMat);
+        beam.position.set(lightPos.x, 3.6, lightPos.z);
+        scene.add(beam);
+        const spot = new THREE.SpotLight(0xffe9a8, 2.2, 30, 0.6, 0.5);
+        spot.position.set(lightPos.x, 8, lightPos.z);
+        spot.target.position.set(lightPos.x, 0, lightPos.z);
+        scene.add(spot); scene.add(spot.target);
+        const pl = new THREE.PointLight(0xffe9a8, 1.4, 14);
+        pl.position.copy(lightOrb.position); scene.add(pl);
+        // avatar pemain
+        avatar = new THREE.Mesh(
+          new THREE.SphereGeometry(0.34, 18, 18),
+          new THREE.MeshStandardMaterial({ color:0xf2ead2, emissive:0x665522, roughness:0.4 })
+        );
+        avatar.position.set(player.x, 0.45, player.z);
+        scene.add(avatar);
+        avatarLight = new THREE.PointLight(0xfff0c0, 0.9, 7);
+        scene.add(avatarLight);
+        // klik tanah = berjalan ke sana + bunyi tanah
+        const el = renderer.domElement;
+        el.style.touchAction = "none";
+        el.addEventListener("pointerdown", function(e){
+          const rect = el.getBoundingClientRect();
+          const nd = new THREE.Vector2(((e.clientX-rect.left)/rect.width)*2-1, -((e.clientY-rect.top)/rect.height)*2+1);
+          const rc = new THREE.Raycaster(); rc.setFromCamera(nd, camera);
+          const hit = rc.intersectObject(ground);
+          if(hit.length){
+            player.tx = hit[0].point.x; player.tz = hit[0].point.z;
+            touchSound("ground", hit[0].point.x, hit[0].point.z);
+          }
+        });
+        resize();
+        window.addEventListener("resize", resize);
+      }
+      function resize(){
+        if(!renderer) return;
+        const stage = document.getElementById("wake-stage");
+        renderer.setSize(stage.clientWidth, stage.clientHeight);
+        camera.aspect = stage.clientWidth / stage.clientHeight;
+        camera.updateProjectionMatrix();
+      }
+      function frame(){
+        raf = requestAnimationFrame(frame);
+        const dt = 0.016;
+        // gerak keyboard
+        let mx = 0, mz = 0;
+        if(keysDown["arrowup"] || keysDown["w"]) mz -= 1;
+        if(keysDown["arrowdown"] || keysDown["s"]) mz += 1;
+        if(keysDown["arrowleft"] || keysDown["a"]) mx -= 1;
+        if(keysDown["arrowright"] || keysDown["d"]) mx += 1;
+        if(mx || mz){
+          const len = Math.hypot(mx, mz);
+          player.tx = player.x; player.tz = player.z;
+          player.x += (mx/len) * player.speed * dt;
+          player.z += (mz/len) * player.speed * dt;
+        } else {
+          // berjalan menuju target klik
+          const dx = player.tx - player.x, dz = player.tz - player.z;
+          const d = Math.hypot(dx, dz);
+          if(d > 0.15){
+            player.x += (dx/d) * player.speed * dt;
+            player.z += (dz/d) * player.speed * dt;
+          }
+        }
+        const rr = Math.hypot(player.x, player.z);
+        if(rr > WORLD_R){ player.x *= WORLD_R/rr; player.z *= WORLD_R/rr; }
+        avatar.position.set(player.x, 0.45 + Math.sin(performance.now()*0.004)*0.05, player.z);
+        avatarLight.position.set(player.x, 1.2, player.z);
+        // kamera mengikuti dari belakang-atas
+        const camTarget = new THREE.Vector3(player.x, 6.5, player.z + 8.5);
+        camera.position.lerp(camTarget, 0.06);
+        camera.lookAt(player.x, 0.6, player.z);
+        if(beam) beam.rotation.y += 0.003;
+        if(lightOrb) lightOrb.position.y = 3.4 + Math.sin(performance.now()*0.0012)*0.25;
+        // deteksi sentuhan pohon/batu/beam
+        const now = performance.now();
+        const check = function(obj, kind){
+          const d = Math.hypot(obj.userData.x - player.x, obj.userData.z - player.z);
+          const id = kind + "-" + obj.id;
+          if(d < 1.7 && (!lastTouchAt[id] || now - lastTouchAt[id] > 2200)){
+            lastTouchAt[id] = now;
+            obj.userData.glowUntil = now + 900;
+            obj.userData.mats.forEach(function(m){ m.emissive.setHex(kind === "tree" ? 0x2e5c1e : 0x4a4433); });
+            touchSound(kind, obj.userData.x, obj.userData.z);
+          }
+          if(obj.userData.glowUntil && now > obj.userData.glowUntil){
+            obj.userData.mats.forEach(function(m){ m.emissive.setHex(0x000000); });
+            obj.userData.glowUntil = 0;
+          }
+        };
+        trees.forEach(function(t){ check(t, "tree"); });
+        rocks.forEach(function(r){ check(r, "rock"); });
+        const dl = distToLight(player.x, player.z);
+        if(dl < 2.4 && (!lastTouchAt.beam || now - lastTouchAt.beam > 2600)){
+          lastTouchAt.beam = now;
+          touchSound("beam", player.x, player.z);
+        }
+        renderer.render(scene, camera);
+      }
+      function onKey(down){
+        return function(e){
+          if(currentView !== "wake") return;
+          const k = e.key.toLowerCase();
+          if(["arrowup","arrowdown","arrowleft","arrowright"," "].includes(k)) e.preventDefault();
+          keysDown[k] = down;
+        };
+      }
+      return {
+        init: function(){
+          buildDots();
+          initThree();
+          document.getElementById("wake-play").addEventListener("click", function(){ setPlaying(!playing); });
+          document.getElementById("wake-clear").addEventListener("click", function(){
+            loopSteps = new Array(16).fill(null); paintDots(); status("Loop dibersihkan. Sentuh sesuatu untuk merekam lagi.");
+          });
+          const b = document.getElementById("wake-bpm");
+          b.addEventListener("input", function(){
+            bpm = +b.value;
+            document.getElementById("wake-bpm-o").textContent = bpm + " BPM";
+            if(playing){ clearInterval(timer); timer = setInterval(tick, (60/bpm)/2 * 1000); }
+          });
+          document.querySelectorAll("#view-wake .dpad button").forEach(function(btn){
+            const dir = btn.getAttribute("data-dir");
+            const map = { up:"arrowup", down:"arrowdown", left:"arrowleft", right:"arrowright" };
+            const on = function(e){ e.preventDefault(); keysDown[map[dir]] = true; };
+            const off = function(){ keysDown[map[dir]] = false; };
+            btn.addEventListener("pointerdown", on);
+            btn.addEventListener("pointerup", off);
+            btn.addEventListener("pointerleave", off);
+            btn.addEventListener("pointercancel", off);
+          });
+          window.addEventListener("keydown", onKey(true));
+          window.addEventListener("keyup", onKey(false));
+        },
+        start: function(){ resize(); if(!raf && renderer) frame(); },
+        stop: function(){
+          if(raf) cancelAnimationFrame(raf); raf = null;
+          if(playing) setPlaying(false);
+          Object.keys(keysDown).forEach(function(k){ keysDown[k] = false; });
+        }
+      };
+    })();
+
+  /* ===== 3. CHAOS / 4. GATHER / 5. CIRCUIT ===== */
+    /* ============================================================
+       3. CHAOS 混沌 — strange attractor memodulasi synth secara live.
+       ============================================================ */
+    Instruments.chaos = (function(){
+      let canvas, ctx, raf = null;
+      let state = { x:0.1, y:0, z:0 };
+      let type = "lorenz", speed = 1, amount = 0.7, wave = "sawtooth";
+      const held = {}; // noteName -> {osc, filter, gain, base}
+      const KEYS = [
+        { k:"a", name:"C",  oct:4 }, { k:"w", name:"C#", oct:4 },
+        { k:"s", name:"D",  oct:4 }, { k:"e", name:"D#", oct:4 },
+        { k:"d", name:"E",  oct:4 }, { k:"f", name:"F",  oct:4 },
+        { k:"t", name:"F#", oct:4 }, { k:"g", name:"G",  oct:4 },
+        { k:"y", name:"G#", oct:4 }, { k:"h", name:"A",  oct:4 },
+        { k:"u", name:"A#", oct:4 }, { k:"j", name:"B",  oct:4 },
+        { k:"k", name:"C",  oct:5 }
+      ];
+      function deriv(s){
+        if(type === "lorenz"){
+          const sg = 10, r = 28, b = 8/3;
+          return { x: sg*(s.y - s.x), y: s.x*(r - s.z) - s.y, z: s.x*s.y - b*s.z };
+        } else if(type === "rossler"){
+          const a = 0.2, b = 0.2, c = 5.7;
+          return { x: -s.y - s.z, y: s.x + a*s.y, z: b + s.z*(s.x - c) };
+        }
+        // aizawa
+        const a=0.95, b=0.7, c=0.6, d=3.5, e=0.25, f=0.1;
+        const x2 = s.x*s.x, y2 = s.y*s.y;
+        return {
+          x: (s.z - b)*s.x - d*s.y,
+          y: d*s.x + (s.z - b)*s.y,
+          z: c + a*s.z - (s.z*s.z*s.z)/3 - (x2 + y2)*(1 + e*s.z) + f*s.z*Math.pow(s.x,3)
+        };
+      }
+      function resetState(){
+        if(type === "lorenz") state = { x:0.1, y:0, z:0 };
+        else if(type === "rossler") state = { x:1, y:1, z:0 };
+        else state = { x:0.1, y:0, z:0 };
+        ctx && ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      // proyeksi state -> parameter audio (dinormalisasi kasar per attractor)
+      function mapped(){
+        let nx, ny, nz;
+        if(type === "lorenz"){ nx = state.x/22; ny = state.y/28; nz = state.z/45; }
+        else if(type === "rossler"){ nx = state.x/11; ny = state.y/11; nz = state.z/22; }
+        else { nx = state.x/1.6; ny = state.y/1.6; nz = (state.z+0.3)/1.6; }
+        return {
+          pitch: 1 + nx * 0.5 * amount,                     // geser nada hingga ±setengah oktaf-ish
+          cutoff: Math.max(120, 900 + (ny + 1) * 1600 * (0.3 + amount)),
+          vib: Math.abs(nz) * 14 * amount                    // Hz vibrato dari z
+        };
+      }
+      function noteOn(def, el){
+        ac();
+        const id = def.name + def.oct;
+        if(held[id]) return;
+        const t = AC.currentTime;
+        const base = freqOf(def.name, def.oct);
+        const o = AC.createOscillator(); o.type = wave; o.frequency.value = base;
+        const o2 = AC.createOscillator(); o2.type = "sine"; o2.frequency.value = base / 2;
+        const f = AC.createBiquadFilter(); f.type = "lowpass"; f.Q.value = 4;
+        const g = AC.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.24, t + 0.02);
+        const g2 = AC.createGain(); g2.gain.value = 0.4;
+        o.connect(f); o2.connect(g2); g2.connect(f); f.connect(g); g.connect(MASTER);
+        o.start(); o2.start();
+        held[id] = { osc:o, osc2:o2, filter:f, gain:g, base:base };
+        if(el) el.classList.add("held");
+      }
+      function noteOff(def, el){
+        const id = def.name + def.oct;
+        const h = held[id]; if(!h) return;
+        const t = AC.currentTime;
+        h.gain.gain.cancelScheduledValues(t);
+        h.gain.gain.setValueAtTime(h.gain.gain.value, t);
+        h.gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+        h.osc.stop(t + 0.3); h.osc2.stop(t + 0.3);
+        delete held[id];
+        if(el) el.classList.remove("held");
+      }
+      function frame(){
+        raf = requestAnimationFrame(frame);
+        const w = canvas.width, h = canvas.height;
+        // fade trail
+        ctx.fillStyle = "rgba(10,12,10,0.055)";
+        ctx.fillRect(0, 0, w, h);
+        const dt = 0.008 * speed;
+        const steps = 26;
+        ctx.lineWidth = 1.4;
+        for(let i=0;i<steps;i++){
+          const d = deriv(state);
+          const px = state.x, py = type === "lorenz" ? state.z : state.y, pz = state.z;
+          state.x += d.x * dt; state.y += d.y * dt; state.z += d.z * dt;
+          if(!isFinite(state.x) || Math.abs(state.x) > 1e4){ resetState(); break; }
+          // proyeksi: x horizontal, (z utk lorenz / y utk lain) vertikal
+          let sx, sy, scale, cy;
+          if(type === "lorenz"){ scale = h/58; sx = w/2 + px*scale; cy = 26; sy = h - (pz)*scale - 10; }
+          else if(type === "rossler"){ scale = h/30; sx = w/2 + px*scale; sy = h/2 - py*scale; }
+          else { scale = h/4.4; sx = w/2 + px*scale; sy = h/2 - py*scale; }
+          const hueMix = Math.max(0, Math.min(1, (pz % 40)/40));
+          ctx.strokeStyle = "rgba(95,174,158,0.85)";
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          const d2 = deriv(state);
+          let nx2 = state.x + d2.x*dt, nz2 = state.z + d2.z*dt, ny2 = state.y + d2.y*dt;
+          let ex, ey;
+          if(type === "lorenz"){ ex = w/2 + nx2*scale; ey = h - nz2*scale - 10; }
+          else if(type === "rossler"){ ex = w/2 + nx2*scale; ey = h/2 - ny2*scale; }
+          else { ex = w/2 + nx2*scale; ey = h/2 - ny2*scale; }
+          ctx.lineTo(ex, ey);
+          ctx.stroke();
+        }
+        // titik kepala menyala
+        const m = mapped();
+        const now = performance.now();
+        Object.keys(held).forEach(function(id){
+          const hh = held[id];
+          hh.osc.frequency.value = hh.base * m.pitch;
+          hh.osc2.frequency.value = hh.base * m.pitch / 2;
+          hh.filter.frequency.value = m.cutoff;
+        });
+        const ro = document.getElementById("chaos-readout");
+        if(ro && (frame.n = (frame.n||0)+1) % 6 === 0){
+          ro.textContent = "x " + state.x.toFixed(2) + " · y " + state.y.toFixed(2) + " · z " + state.z.toFixed(2) +
+            "  →  nada ×" + m.pitch.toFixed(3) + " · filter " + Math.round(m.cutoff) + " Hz";
+        }
+      }
+      function buildKeys(){
+        const wrap = document.getElementById("chaos-keys");
+        KEYS.forEach(function(def){
+          const b = document.createElement("button");
+          b.className = "key";
+          b.innerHTML = '<span class="nm">' + def.name + def.oct + '</span><small>' + def.k.toUpperCase() + '</small>';
+          b.addEventListener("pointerdown", function(e){ e.preventDefault(); b.setPointerCapture(e.pointerId); noteOn(def, b); });
+          const off = function(){ noteOff(def, b); };
+          b.addEventListener("pointerup", off);
+          b.addEventListener("pointercancel", off);
+          b.addEventListener("lostpointercapture", off);
+          def.el = b;
+          wrap.appendChild(b);
+        });
+        window.addEventListener("keydown", function(e){
+          if(currentView !== "chaos" || e.repeat) return;
+          const def = KEYS.find(function(k){ return k.k === e.key.toLowerCase(); });
+          if(def) noteOn(def, def.el);
+        });
+        window.addEventListener("keyup", function(e){
+          if(currentView !== "chaos") return;
+          const def = KEYS.find(function(k){ return k.k === e.key.toLowerCase(); });
+          if(def) noteOff(def, def.el);
+        });
+      }
+      function resize(){
+        const stage = canvas.parentElement;
+        canvas.width = stage.clientWidth;
+        canvas.height = Math.min(440, Math.max(300, window.innerHeight * 0.5));
+      }
+      return {
+        init: function(){
+          canvas = document.getElementById("chaos-canvas");
+          ctx = canvas.getContext("2d");
+          resize(); window.addEventListener("resize", resize);
+          ctx.fillStyle = "#0a0c0a"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+          buildKeys();
+          document.getElementById("chaos-type").addEventListener("change", function(e){
+            type = e.target.value; resetState();
+          });
+          document.getElementById("chaos-wave").addEventListener("change", function(e){
+            wave = e.target.value;
+            Object.keys(held).forEach(function(id){ held[id].osc.type = wave; });
+          });
+          document.getElementById("chaos-speed").addEventListener("input", function(e){
+            speed = +e.target.value / 100;
+            document.getElementById("chaos-speed-o").textContent = speed.toFixed(1) + "×";
+          });
+          document.getElementById("chaos-amt").addEventListener("input", function(e){
+            amount = +e.target.value / 100;
+            document.getElementById("chaos-amt-o").textContent = e.target.value + "%";
+          });
+          document.getElementById("chaos-kick").addEventListener("click", function(){
+            state.x += (Math.random()-0.5) * 4;
+            state.y += (Math.random()-0.5) * 4;
+            toast("Titik dilempar ke orbit baru.");
+          });
+          resetState();
+        },
+        start: function(){ resize(); if(!raf) frame(); },
+        stop: function(){
+          if(raf) cancelAnimationFrame(raf); raf = null;
+          KEYS.forEach(function(def){ noteOff(def, def.el); });
+        }
+      };
+    })();
+
+    /* ============================================================
+       4. GATHER 聚 — gambar -> point cloud 3D yang menyebar/berkumpul.
+       ============================================================ */
+    Instruments.gather = (function(){
+      let renderer, scene, camera, points, raf = null;
+      let positions = null, targets = null, scatters = null, colors = null;
+      let morph = 1, morphTarget = 1, count = 0;
+      let imgStats = null; // {bands:[{bright,hue}], avgBright}
+      let auto = false, autoT = 0;
+      let rotY = 0, tRotY = 0;
+      const COLS = 120, ROWS = 84;
+
+      function status(msg){ document.getElementById("gather-status").textContent = msg; }
+      function sampleImage(img){
+        const cv = document.createElement("canvas");
+        cv.width = COLS; cv.height = ROWS;
+        const cx = cv.getContext("2d");
+        // fit cover
+        const ir = img.width / img.height, cr = COLS / ROWS;
+        let sw, sh, sx, sy;
+        if(ir > cr){ sh = img.height; sw = sh * cr; sx = (img.width - sw)/2; sy = 0; }
+        else { sw = img.width; sh = sw / cr; sx = 0; sy = (img.height - sh)/2; }
+        cx.drawImage(img, sx, sy, sw, sh, 0, 0, COLS, ROWS);
+        const data = cx.getImageData(0, 0, COLS, ROWS).data;
+        count = COLS * ROWS;
+        targets = new Float32Array(count*3);
+        scatters = new Float32Array(count*3);
+        colors = new Float32Array(count*3);
+        const bands = [0,1,2,3,4].map(function(){ return { sum:0, n:0, r:0, g:0, b:0 }; });
+        let totalBright = 0;
+        for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+          const i = y*COLS + x, p = i*4;
+          const r = data[p]/255, g = data[p+1]/255, b = data[p+2]/255;
+          const bright = (r + g + b) / 3;
+          totalBright += bright;
+          targets[i*3]   = (x/COLS - 0.5) * 10;
+          targets[i*3+1] = (0.5 - y/ROWS) * 7;
+          targets[i*3+2] = (bright - 0.5) * 3.4; // kedalaman dari kecerahan
+          const th = Math.random()*Math.PI*2, ph = Math.acos(2*Math.random()-1), rad = 2.2 + Math.random()*3.4;
+          scatters[i*3]   = rad * Math.sin(ph) * Math.cos(th);
+          scatters[i*3+1] = rad * Math.cos(ph) * 0.8;
+          scatters[i*3+2] = rad * Math.sin(ph) * Math.sin(th);
+          colors[i*3] = r; colors[i*3+1] = g; colors[i*3+2] = b;
+          const band = Math.min(4, Math.floor(x / COLS * 5));
+          bands[band].sum += bright; bands[band].n++; bands[band].r += r; bands[band].g += g; bands[band].b += b;
+        }
+        imgStats = {
+          bands: bands.map(function(bd){ return { bright: bd.sum/Math.max(1,bd.n), r: bd.r/Math.max(1,bd.n), g: bd.g/Math.max(1,bd.n), b: bd.b/Math.max(1,bd.n) }; }),
+          avgBright: totalBright / count
+        };
+        if(points){
+          points.geometry.setAttribute("position", new THREE.BufferAttribute(targets.slice(), 3));
+          points.geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+          positions = points.geometry.attributes.position.array;
+        }
+        status("Gambar menjadi " + count.toLocaleString("id-ID") + " titik. Kecerahan rata-rata " + Math.round(imgStats.avgBright*100) + "% — geser Sebar↔Kumpul atau tekan Kumpulkan & bunyikan.");
+      }
+      function playChord(){
+        if(!imgStats) return;
+        ac();
+        const t = AC.currentTime;
+        const root = freqOf("C", 3);
+        imgStats.bands.forEach(function(bd, i){
+          const idx = Math.round(bd.bright * 9); // 0..9 langkah pentatonik
+          const f = pentaFreq(root, idx);
+          playPluck(f, t + i * 0.09, { wave:"triangle", vol:0.16 + bd.bright * 0.22, dur:1.4, cutoff:1200 + bd.bright*2600 });
+          playPluck(f * 2, t + i * 0.09 + 0.03, { wave:"sine", vol:0.08, dur:1.1 });
+        });
+        playPad([root/2, root * 1.5], t, 0.05, 2.2);
+        status("Akor dari gambar: lima pita kecerahan → lima not pentatonik.");
+      }
+      function defaultImage(){
+        const cv = document.createElement("canvas");
+        cv.width = 480; cv.height = 336;
+        const cx = cv.getContext("2d");
+        const grad = cx.createLinearGradient(0, 0, 0, 336);
+        grad.addColorStop(0, "#1c2f4a"); grad.addColorStop(0.55, "#7a4a2b"); grad.addColorStop(1, "#141a10");
+        cx.fillStyle = grad; cx.fillRect(0, 0, 480, 336);
+        // matahari
+        const sun = cx.createRadialGradient(330, 110, 6, 330, 110, 90);
+        sun.addColorStop(0, "#fff3c4"); sun.addColorStop(0.35, "#e8a94c"); sun.addColorStop(1, "rgba(232,169,76,0)");
+        cx.fillStyle = sun; cx.beginPath(); cx.arc(330, 110, 90, 0, 7); cx.fill();
+        cx.fillStyle = "#f7e3ac"; cx.beginPath(); cx.arc(330, 110, 34, 0, 7); cx.fill();
+        // bukit
+        cx.fillStyle = "#24351c";
+        cx.beginPath(); cx.moveTo(0, 336); cx.lineTo(0, 250); cx.quadraticCurveTo(140, 190, 300, 245); cx.quadraticCurveTo(410, 280, 480, 240); cx.lineTo(480, 336); cx.closePath(); cx.fill();
+        cx.fillStyle = "#182612";
+        cx.beginPath(); cx.moveTo(0, 336); cx.lineTo(0, 300); cx.quadraticCurveTo(200, 250, 480, 305); cx.lineTo(480, 336); cx.closePath(); cx.fill();
+        const img = new Image();
+        img.onload = function(){ sampleImage(img); };
+        img.src = cv.toDataURL();
+      }
+      function initThree(){
+        const stage = document.getElementById("gather-stage");
+        if(!hasThree()){ threeFail(stage); return; }
+        renderer = new THREE.WebGLRenderer({ antialias:true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        stage.appendChild(renderer.domElement);
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x08080a);
+        scene.fog = new THREE.Fog(0x08080a, 12, 26);
+        camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+        camera.position.set(0, 0.6, 11.5);
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3), 3));
+        points = new THREE.Points(geo, new THREE.PointsMaterial({ size:0.075, vertexColors:true, transparent:true, opacity:0.95, sizeAttenuation:true }));
+        points.frustumCulled = false;
+        scene.add(points);
+        // interaksi putar
+        const el = renderer.domElement;
+        el.style.touchAction = "none";
+        let drag = false, lx = 0;
+        el.addEventListener("pointerdown", function(e){ drag = true; lx = e.clientX; el.setPointerCapture(e.pointerId); });
+        el.addEventListener("pointermove", function(e){ if(drag){ tRotY += (e.clientX - lx) * 0.008; lx = e.clientX; } });
+        el.addEventListener("pointerup", function(){ drag = false; });
+        resize();
+        window.addEventListener("resize", resize);
+      }
+      function resize(){
+        if(!renderer) return;
+        const stage = document.getElementById("gather-stage");
+        renderer.setSize(stage.clientWidth, stage.clientHeight);
+        camera.aspect = stage.clientWidth / stage.clientHeight;
+        camera.updateProjectionMatrix();
+      }
+      function frame(){
+        raf = requestAnimationFrame(frame);
+        if(auto){
+          autoT += 0.016;
+          const cyc = (Math.sin(autoT * 0.55) + 1) / 2; // 0..1..0
+          morphTarget = cyc;
+          document.getElementById("gather-morph").value = Math.round(cyc * 100);
+          document.getElementById("gather-morph-o").textContent = Math.round(cyc * 100) + "%";
+          if(cyc > 0.985 && !frame.chorded){ frame.chorded = true; playChord(); }
+          if(cyc < 0.5) frame.chorded = false;
+        }
+        morph += (morphTarget - morph) * 0.045;
+        if(positions && targets && scatters){
+          for(let i=0;i<count*3;i++){
+            positions[i] = scatters[i] + (targets[i] - scatters[i]) * morph;
+          }
+          points.geometry.attributes.position.needsUpdate = true;
+        }
+        rotY += (tRotY - rotY) * 0.08 + 0.0012;
+        points.rotation.y = rotY;
+        points.rotation.x = Math.sin(performance.now()*0.0002) * 0.06;
+        renderer.render(scene, camera);
+      }
+      return {
+        init: function(){
+          initThree();
+          defaultImage();
+          const slider = document.getElementById("gather-morph");
+          slider.addEventListener("input", function(){
+            auto = false;
+            document.getElementById("gather-auto").textContent = "▶ Putar otomatis (sebar–kumpul)";
+            morphTarget = +slider.value / 100;
+            document.getElementById("gather-morph-o").textContent = slider.value + "%";
+          });
+          document.getElementById("gather-pulse").addEventListener("click", function(){
+            auto = false;
+            document.getElementById("gather-auto").textContent = "▶ Putar otomatis (sebar–kumpul)";
+            morphTarget = 0;
+            slider.value = 0; document.getElementById("gather-morph-o").textContent = "0%";
+            setTimeout(function(){
+              morphTarget = 1; slider.value = 100;
+              document.getElementById("gather-morph-o").textContent = "100%";
+              setTimeout(playChord, 650);
+            }, 420);
+          });
+          document.getElementById("gather-auto").addEventListener("click", function(e){
+            auto = !auto;
+            e.target.textContent = auto ? "⏸ Berhenti otomatis" : "▶ Putar otomatis (sebar–kumpul)";
+            if(auto) ac();
+          });
+          document.getElementById("gather-sample").addEventListener("click", defaultImage);
+          document.getElementById("gather-file").addEventListener("change", function(e){
+            const file = e.target.files && e.target.files[0];
+            if(!file) return;
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = function(){ sampleImage(img); URL.revokeObjectURL(url); toast("Gambar dimuat sebagai point cloud."); };
+            img.onerror = function(){ toast("Gambar tidak bisa dibaca."); };
+            img.src = url;
+          });
+        },
+        start: function(){ resize(); if(!raf && renderer) frame(); },
+        stop: function(){ if(raf) cancelAnimationFrame(raf); raf = null; auto = false; }
+      };
+    })();
+
+    /* ============================================================
+       5. CIRCUIT 電 — rangkaian seri 4 slot, di-solve dengan hukum Ohm,
+       hasilnya membentuk parameter synth.
+       ============================================================ */
+    Instruments.circuit = (function(){
+      const TYPES = ["battery", "resistor", "capacitor", "led", "inductor", "empty"];
+      const TYPE_INFO = {
+        battery:   { label:"Baterai",  unit:"V",  min:1,  max:24,   def:9,    fmt:function(v){ return v.toFixed(0) + " V"; } },
+        resistor:  { label:"Resistor", unit:"Ω",  min:10, max:1000, def:220,  fmt:function(v){ return v.toFixed(0) + " Ω"; } },
+        capacitor: { label:"Kapasitor",unit:"µF", min:1,  max:220,  def:47,   fmt:function(v){ return v.toFixed(0) + " µF"; } },
+        led:       { label:"LED",      unit:"Vf", min:1.6,max:3.6,  def:2.1,  fmt:function(v){ return v.toFixed(1) + " V"; } },
+        inductor:  { label:"Induktor", unit:"mH", min:1,  max:100,  def:22,   fmt:function(v){ return v.toFixed(0) + " mH"; } },
+        empty:     { label:"Kosong",   unit:"",   min:0,  max:0,    def:0,    fmt:function(){ return "—"; } }
+      };
+      let slots = [
+        { type:"battery",   value:9 },
+        { type:"resistor",  value:220 },
+        { type:"capacitor", value:47 },
+        { type:"led",       value:2.1 }
+      ];
+      let solved = null;
+      const KEYS = [
+        { k:"a", name:"C", oct:4 }, { k:"s", name:"D", oct:4 }, { k:"d", name:"E", oct:4 },
+        { k:"f", name:"F", oct:4 }, { k:"g", name:"G", oct:4 }, { k:"h", name:"A", oct:4 },
+        { k:"j", name:"B", oct:4 }, { k:"k", name:"C", oct:5 }
+      ];
+      function solve(){
+        let V = 0, R = 0, C = 0, L = 0, vf = 0, hasLED = false, open = false;
+        slots.forEach(function(s){
+          if(s.type === "empty") open = true;
+          else if(s.type === "battery") V += s.value;
+          else if(s.type === "resistor") R += s.value;
+          else if(s.type === "capacitor") C += s.value;
+          else if(s.type === "inductor"){ L += s.value; R += 8; }
+          else if(s.type === "led"){ vf += s.value; hasLED = true; R += 12; }
+        });
+        if(R <= 0) R = 1;
+        const Veff = Math.max(0, V - vf);
+        const I = open ? 0 : Veff / R; // ampere
+        const ImA = I * 1000;
+        solved = {
+          V:V, R:R, C:C, L:L, I:I, ImA:ImA, open:open, hasLED:hasLED,
+          ledOn: hasLED && I > 0.001,
+          cutoff: Math.max(120, Math.min(9000, 140 + ImA * 42)),
+          vol: Math.max(0, Math.min(0.85, ImA / 55)),
+          release: 0.08 + C * 0.012,
+          q: 1 + L * 0.12,
+          bright: Math.max(0, Math.min(1, ImA / 45))
+        };
+        return solved;
+      }
+      function draw(){
+        solve();
+        const svg = document.getElementById("circuit-svg");
+        const NS = "http://www.w3.org/2000/svg";
+        svg.innerHTML = "";
+        function el(name, attrs){
+          const e = document.createElementNS(NS, name);
+          for(const k in attrs) e.setAttribute(k, attrs[k]);
+          return e;
+        }
+        // kabel loop persegi
+        const wire = el("path", { d:"M90,70 H670 V230 H90 Z", fill:"none", stroke: solved.open ? "#4a4436" : "#8a7f4f", "stroke-width":2.5, "stroke-dasharray": solved.open ? "7 6" : "none" });
+        svg.appendChild(wire);
+        // label arus
+        const il = el("text", { x:380, y:52, "text-anchor":"middle", fill:"#a39d88", "font-size":13, "font-family":"monospace" });
+        il.textContent = solved.open ? "I = 0 — rangkaian terbuka" : "I = " + (solved.ImA >= 1 ? solved.ImA.toFixed(1) + " mA" : (solved.I*1e6).toFixed(0) + " µA") + " mengalir →";
+        svg.appendChild(il);
+        // slot di sisi atas (2) dan bawah (2)
+        const slotPos = [ {x:230,y:70}, {x:530,y:70}, {x:530,y:230}, {x:230,y:230} ];
+        slots.forEach(function(s, i){
+          const p = slotPos[i];
+          const g = el("g", { "class":"comp", "data-slot":i });
+          const body = el("rect", { "class":"body", x:p.x-62, y:p.y-30, width:124, height:60, rx:8 });
+          g.appendChild(body);
+          // simbol
+          const sym = el("text", { x:p.x, y:p.y-2, "text-anchor":"middle", "font-size":21 });
+          sym.textContent = { battery:"+ −", resistor:"∿", capacitor:"⊣⊢", led:"▲|◀", inductor:"∿∿", empty:"✕" }[s.type] || "?";
+          g.appendChild(sym);
+          const tp = el("text", { "class":"typ", x:p.x, y:p.y+16, "text-anchor":"middle", "font-size":11.5 });
+          tp.textContent = TYPE_INFO[s.type].label;
+          g.appendChild(tp);
+          const vl = el("text", { "class":"val", x:p.x, y:p.y+52, "text-anchor":"middle", "font-size":13.5 });
+          vl.textContent = TYPE_INFO[s.type].fmt(s.value);
+          g.appendChild(vl);
+          // glow LED
+          if(s.type === "led" && solved.ledOn){
+            const glow = el("circle", { "class":"led-glow", cx:p.x, cy:p.y-34, r:11, fill:"#ffd94d", opacity:(0.35 + solved.bright*0.6).toFixed(2) });
+            svg.appendChild(glow);
+            const core = el("circle", { cx:p.x, cy:p.y-34, r:5, fill:"#fff3b0" });
+            svg.appendChild(core);
+          } else if(s.type === "led"){
+            const dot = el("circle", { cx:p.x, cy:p.y-34, r:5, fill:"#3a382c" });
+            svg.appendChild(dot);
+          }
+          // interaksi: klik = ganti tipe, seret vertikal = nilai
+          let startY = null, startVal = 0, dragged = false;
+          g.addEventListener("pointerdown", function(e){
+            startY = e.clientY; startVal = s.value; dragged = false;
+            g.setPointerCapture(e.pointerId);
+          });
+          g.addEventListener("pointermove", function(e){
+            if(startY === null) return;
+            const dy = startY - e.clientY;
+            if(Math.abs(dy) > 4) dragged = true;
+            if(dragged && s.type !== "empty"){
+              const info = TYPE_INFO[s.type];
+              const nv = startVal + dy * (info.max - info.min) / 160;
+              s.value = Math.max(info.min, Math.min(info.max, nv));
+              // jangan gambar ulang SVG saat drag (pointer capture hilang);
+              // cukup perbarui label nilai + readout.
+              solve();
+              const vals = svg.querySelectorAll(".val");
+              if(vals[i]) vals[i].textContent = TYPE_INFO[s.type].fmt(s.value);
+              paintReadout();
+            }
+          });
+          g.addEventListener("pointerup", function(){
+            if(!dragged){
+              const idx = TYPES.indexOf(s.type);
+              s.type = TYPES[(idx + 1) % TYPES.length];
+              if(s.type !== "empty") s.value = TYPE_INFO[s.type].def;
+              draw();
+              const so = solve();
+              if(so.open) toast("Slot kosong — rangkaian terbuka, tidak ada arus.");
+            }
+            startY = null;
+          });
+          svg.appendChild(g);
+        });
+        paintReadout();
+      }
+      function paintReadout(){
+        const ro = document.getElementById("circuit-readout");
+        if(!ro || !solved) return;
+        if(solved.open){
+          ro.innerHTML = "Status: <b>rangkaian terbuka</b> — tidak ada arus, tidak ada suara.<br/>Ada dan tiada saling melahirkan: isi semua slot untuk mendengar.";
+        } else {
+          ro.innerHTML =
+            "Tegangan sumber: <b>" + solved.V.toFixed(1) + " V</b><br/>" +
+            "Hambatan total: <b>" + solved.R.toFixed(0) + " Ω</b><br/>" +
+            "Arus (I = V/R): <b>" + (solved.ImA >= 1 ? solved.ImA.toFixed(2) + " mA" : (solved.I*1e6).toFixed(0) + " µA") + "</b><br/>" +
+            "Filter cutoff: <b>" + Math.round(solved.cutoff) + " Hz</b> · Resonansi: <b>" + solved.q.toFixed(1) + "</b><br/>" +
+            "Volume: <b>" + Math.round(solved.vol * 100) + "%</b> · Release (kapasitor): <b>" + solved.release.toFixed(2) + " s</b><br/>" +
+            "LED: <b>" + (solved.hasLED ? (solved.ledOn ? "menyala (" + Math.round(solved.bright*100) + "%)" : "mati — arus terlalu kecil") : "tidak terpasang") + "</b>";
+        }
+      }
+      function playThrough(freq){
+        const so = solve();
+        if(so.open){ toast("Rangkaian terbuka — tidak ada suara. Isi slot yang kosong."); return; }
+        if(so.vol <= 0.01){ toast("Arus terlalu kecil — naikkan tegangan baterai atau turunkan resistor."); return; }
+        ac();
+        const t = AC.currentTime;
+        playPluck(freq, t, {
+          wave: so.hasLED && so.ledOn ? "sawtooth" : "triangle",
+          vol: so.vol, dur: so.release + 0.35, cutoff: so.cutoff, q: so.q
+        });
+        // kedipkan LED mengikuti not
+        draw();
+      }
+      function buildKeys(){
+        const wrap = document.getElementById("circuit-keys");
+        KEYS.forEach(function(def){
+          const b = document.createElement("button");
+          b.className = "key";
+          b.innerHTML = '<span class="nm">' + def.name + def.oct + '</span><small>' + def.k.toUpperCase() + '</small>';
+          b.addEventListener("pointerdown", function(e){
+            e.preventDefault();
+            playThrough(freqOf(def.name, def.oct));
+            b.classList.add("held");
+            setTimeout(function(){ b.classList.remove("held"); }, 220);
+          });
+          def.el = b;
+          wrap.appendChild(b);
+        });
+        window.addEventListener("keydown", function(e){
+          if(currentView !== "circuit" || e.repeat) return;
+          const def = KEYS.find(function(k){ return k.k === e.key.toLowerCase(); });
+          if(def){ playThrough(freqOf(def.name, def.oct)); def.el.classList.add("held"); setTimeout(function(){ def.el.classList.remove("held"); }, 220); }
+        });
+      }
+      return {
+        init: function(){ draw(); buildKeys(); },
+        start: function(){ draw(); },
+        stop: function(){}
+      };
+    })();
+}

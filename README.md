@@ -1,6 +1,6 @@
 # DAO Instruments
 
-Five playable browser music instruments in one page. Open it, pick an
+Five playable browser music instruments in one Next.js app. Open it, pick an
 instrument, and play — everything runs client-side with the Web Audio API
 and Three.js.
 
@@ -18,29 +18,27 @@ and Three.js.
 
 ## Run it
 
-No build step, no dependencies to install — it's a single static page.
-
 ```bash
-# any static server works, e.g.
-npx serve .
-# or
-python3 -m http.server
+npm install
+npm run dev     # http://localhost:3000
+npm run build   # production build
+npm start       # serve the production build
 ```
-
-Then open `index.html`. You can also open the file directly in a browser.
 
 ## Deploy (Vercel)
 
-Import this repository in Vercel as a static site. There is no build
-command and no framework preset needed — `index.html` at the root is served
-as-is.
+Import this repository in Vercel — the framework preset is auto-detected as
+Next.js, no custom build settings needed.
 
-## Tech
+## How it's built
 
-- Web Audio API for all sound synthesis
-- Three.js (via CDN) for the 3D instruments
-- Canvas 2D for CHAOS
-- No backend, no database, no tracking
+- `app/page.tsx` — the hub + the five instrument views (client component).
+- `lib/dao.ts` — the instrument logic (audio engine, sequencers, Three.js
+  scenes), ported from the original single-file page and run once after mount.
+- `app/globals.css` — all styling.
+- Three.js loads from CDN (`three@0.152.2`) in the root layout; if it fails
+  to load, the 3D instruments show a message instead of crashing.
+- No backend, no database, no tracking.
 
 ## Inspiration
 
